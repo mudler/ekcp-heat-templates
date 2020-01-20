@@ -9,22 +9,16 @@ heat_template_version: 2014-10-16
 # ssh -l syseleven <externalIP> 
 # 
 
-description: Simple template to deploy an external concourse worker
+description: Simple template to deploy an external ekcp worker
 
 parameters:
-  tsa_host:
-    type: string
-    description: The endpoint of your web node
-  tsa_public_key:
-    type: string
-    description: The public key of your web node
-  worker_private_key:
-    type: string
-    description: The private key of your worker
   key_name:
     type: string
     constraints:
       - custom_constraint: nova.keypair
+  ekcp_host:
+    type: string
+    description: The endpoint of your ekcp master node
   public_network:
     type: string
     default: floating
@@ -37,9 +31,24 @@ parameters:
     default: openSUSE-Leap-15.1-OpenStack
     constraints:
       - custom_constraint: glance.image
-
+  worker_count:
+    type: number
+    description: Number of Worker nodes to boot
+    default: 5
+  root_password:
+    type: string
+    description: Root Password for the VMs
+    default: linux
 
 resources:
+  keypair:
+    type: OS::Nova::KeyPair
+    properties:
+      name:
+        str_replace:
+          template: {list_join: ['-', [{get_param: 'OS::stack_name'}, 'caasp-keypair']]}
+          params:
+            ".": "-"
   allow_ssh:
     type: OS::Neutron::SecurityGroup
     properties:
@@ -57,73 +66,145 @@ resources:
       rules: 
         - { direction: ingress, remote_ip_prefix: 0.0.0.0/0, port_range_min: 80, port_range_max: 80, protocol: tcp } 
 
-  concourse_worker:
-    type: OS::Nova::Server
+  
+  allow_all:
+    type: OS::Neutron::SecurityGroup
     properties:
-      name: concourse_worker
-      user_data_format: RAW
-      user_data: { get_resource: cloud-init-config }    
-      image: { get_param: image }
-      key_name: { get_param: key_name }
-      flavor: { get_param: flavor }
-      networks:
-        - port: { get_resource: port }
+      description: allow incoming traffic  from anywhere. 
+      name: allow incoming traffic
+      rules: 
+        - { direction: ingress, remote_ip_prefix: 0.0.0.0/0, port_range_min: 1, port_range_max: 64000, protocol: tcp } 
 
-  cloud-init-config:
-   # cloud init resource
-   type: OS::Heat::CloudConfig
-   properties:
-     cloud_config:
-       manage_etc_hosts: true
-       users:
-           - name: concourse
-             gecos: concourse Stack user
-             sudo: ALL=(ALL) NOPASSWD:ALL
-             shell: /bin/bash
-       write_files:
-         - content: |
-             $worker_private_key
-           path: /tmp/worker_key
-           permissions: 0600
-         - content: |
-             $tsa_public_key
-           path: /tmp/web.pub
-           permissions: 0744
-         - content: |
-             #!/usr/bin/env bash
-             # start the concourse worker
-             docker run \
-               -v /tmp/worker:/keys/worker \
-               -v /tmp/web.pub:/keys/web.pub \
-               -e CONCOURSE_TSA_HOST=$tsa_host:2222 \
-               -e CONCOURSE_TSA_PUBLIC_KEY="/keys/web.pub" \
-               -e CONCOURSE_TSA_WORKER_PRIVATE_KEY="/keys/worker" \
-               --privileged  \
-               --rm concourse/concourse worker
-           path: /root/start_concourse_worker.sh
-           permissions: 0700
-       runcmd:
-         - /root/start_concourse_worker.sh
-       packages:
-         - docker
+
+
+
+  ekcp_worker:
+    type: OS::Heat::ResourceGroup
+    depends_on:
+      - port
+      - floating_ip
+    properties:
+      count: { get_param: worker_count }
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          name: { list_join: ['-', [{get_param: 'OS::stack_name'}, 'worker', '%index%']] }
+          image: { get_param: image }
+          key_name: { get_param: key_name }
+          flavor: { get_param: flavor }
+          networks:
+            - port: { get_resource: port }
+          # security_groups:
+          #   - { get_resource: allow_all }
+          #   - { get_resource: allow_ssh }
+          #   - { get_resource: allow_webtraffic }
+          user_data_format: RAW
+          user_data:
+            str_replace:
+              template: |
+                #cloud-config
+                disable_root: False
+                ssh_deletekeys: False
+                ssh_pwauth: True
+                chpasswd:
+                  list: |
+                    root:$root_password
+                  expire: False
+              
+                ntp:
+                  enabled: true
+                  #servers:
+                  #  - ntp1.example.com
+                  #  - ntp2.example.com
+                  #  - ntp3.example.com
+                write_files:
+                  - content: |
+                      #!/usr/bin/env bash
+                      # start the ekcp worker
+
+                      IP=$ip
+                      MASTER_IP=$ekcp_host
+                      mkdir ekcp
+                      sudo systemctl start docker && sudo systemctl enable docker
+                      sudo systemctl stop firewalld && sudo systemctl disable firerwalld
+                      pushd ekcp
+                      cat <<EOF > docker-compose.yaml
+                      version: '3'
+                      services:
+                        ekcp-slave:
+                          environment:
+                            - HOST=0.0.0.0
+                            - PORT=8030
+                            - ROUTE_REGISTER=true
+                            - DOMAIN=nip.io
+                            - KUBEHOST=${IP}  # Tweak this to your lan ip      
+                            - FEDERATION_MASTER=http://${MASTER_IP}:8030
+                          image: quay.io/ekcp/ekcp
+                            #build: .
+                          network_mode: "host"
+                          volumes:
+                            - /var/run/docker.sock:/var/run/docker.sock
+                          deploy:
+                            restart_policy:
+                              condition: always
+                        nats:
+                          image: nats:latest
+                          ports:
+                            - "4222:4222"
+                            - "6222:6222"
+                            - "8222:8222"
+                          deploy:
+                            restart_policy:
+                              condition: always
+                        gorouter:
+                        # Replace the pinned cert for security.
+                          image: quay.io/ekcp/gorouter
+                          ports:
+                            - "8081:8081"
+                            - "8082:8082"
+                            - "8083:8083"
+                          links:
+                            - nats
+                          deploy:
+                            restart_policy:
+                              condition: always
+                      EOF
+
+                      docker-compose -f docker-compose.yaml pull
+                      docker-compose -f docker-compose.yaml down
+                      docker-compose -f docker-compose.yaml up -d
+
+                    path: /root/start.sh
+                    permissions: 0700  
+
+                packages:
+                  - docker
+                  - docker-compose
+                  - git
+                runcmd:
+                  - /root/start.sh
+              params:
+                $ip: { get_resource: floating_ip }
+                $root_password: { get_param: root_password }
+                $ekcp_host: { get_param: ekcp_host }
 
   port:
     type: OS::Neutron::Port
     depends_on: [ net, allow_ssh, allow_webtraffic ]
     properties:
       network: { get_resource: net }
-      security_groups: [ get_resource: allow_ssh, get_resource: allow_webtraffic ]
+      security_groups: [ get_resource: allow_ssh, get_resource: allow_webtraffic , get_resource: allow_all ]
 
   net:
     type: OS::Neutron::Net
     properties: 
-      name: concourse-net
+      name: ekcp-net
 
   subnet:
     type: OS::Neutron::Subnet
     depends_on: [ net ]
     properties:
-      name: concourse-subnet
+      name: ekcp-subnet
       dns_nameservers:
         - 8.8.8.8
         - 8.8.4.4
@@ -137,7 +218,7 @@ resources:
     type: OS::Neutron::Router
     properties:
       external_gateway_info: {"network": { get_param: public_network }}
-      name: concourse-router
+      name: ekcp-router
 
   router_subnet_bridge:
     type: OS::Neutron::RouterInterface
