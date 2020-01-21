@@ -133,20 +133,17 @@ resources:
                           image: quay.io/ekcp/ekcp
                             #build: .
                           network_mode: "host"
+                          restart: always
                           volumes:
                             - /var/run/docker.sock:/var/run/docker.sock
-                          deploy:
-                            restart_policy:
-                              condition: always
+
                         nats:
                           image: nats:latest
                           ports:
                             - "4222:4222"
                             - "6222:6222"
                             - "8222:8222"
-                          deploy:
-                            restart_policy:
-                              condition: always
+                          restart: always
                         gorouter:
                         # Replace the pinned cert for security.
                           image: quay.io/ekcp/gorouter
@@ -156,9 +153,7 @@ resources:
                             - "8083:8083"
                           links:
                             - nats
-                          deploy:
-                            restart_policy:
-                              condition: always
+                          restart: always
                       EOF
 
                       cat docker-compose.yaml
