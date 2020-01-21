@@ -167,6 +167,12 @@ resources:
                       docker-compose -f docker-compose.yaml down
                       docker-compose -f docker-compose.yaml up -d
 
+                      # Swapaccount setup
+                      sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="[^"]*/& swapaccount=1/' /etc/default/grub
+                      grub2-mkconfig -o /boot/grub2/grub.cfg
+
+                      reboot
+
                     path: /root/start.sh
                     permissions: 0700  
 
