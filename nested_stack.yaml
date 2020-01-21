@@ -13,7 +13,7 @@ description: Simple template to deploy an external ekcp worker
 
 parameters:
   index:
-    type: number
+    type: string
   key_name:
     type: string
     constraints:
