@@ -39,6 +39,10 @@ parameters:
     type: string
     description: Root Password for the VMs
     default: linux
+  kind_version:
+    type: string
+    description: Kind version to use in the stack
+    default: v0.6.1
 
 resources:
  compute_nodes:
@@ -55,3 +59,4 @@ resources:
          flavor: { get_param: flavor }
          ekcp_host: { get_param: ekcp_host }
          root_password: { get_param: root_password }
+         kind_version: { get_param: kind_version }
