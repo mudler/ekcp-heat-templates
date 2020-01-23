@@ -42,7 +42,8 @@ parameters:
   kind_version:
     type: string
     description: Kind version to use in the stack
-    default: v0.6.1
+    default: 0.2.1
+    #default: v0.6.1
 
 resources:
  compute_nodes:
